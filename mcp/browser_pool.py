@@ -66,6 +66,8 @@ class BrowserPool:
 
     def acquire(self, timeout: float = 30.0) -> BrowserInstance | None:
         """获取一个空闲实例。阻塞直到有空闲或超时。"""
+        if not self.instances:
+            return None
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
@@ -80,8 +82,9 @@ class BrowserPool:
     def release(self, inst: BrowserInstance):
         """归还实例到池子。"""
         if not isinstance(inst, BrowserInstance):
-            sys.stderr.write(f"[Pool] release() 收到非 BrowserInstance 类型: {type(inst)}\n")
-            return
+            raise TypeError(
+                f"release() expects BrowserInstance, got {type(inst).__name__}"
+            )
         with self._lock:
             inst.in_use = False
             inst.last_used = time.time()
