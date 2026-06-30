@@ -79,6 +79,9 @@ class BrowserPool:
 
     def release(self, inst: BrowserInstance):
         """归还实例到池子。"""
+        if not isinstance(inst, BrowserInstance):
+            sys.stderr.write(f"[Pool] release() 收到非 BrowserInstance 类型: {type(inst)}\n")
+            return
         with self._lock:
             inst.in_use = False
             inst.last_used = time.time()

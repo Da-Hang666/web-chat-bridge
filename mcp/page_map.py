@@ -158,6 +158,8 @@ def _tokenize(text: str) -> list[str]:
 
 def collect_geometric_nodes(page) -> list[dict]:
     """通过 JS 采集视口内所有可交互元素的几何信息。"""
+    if page is None:
+        raise TypeError("page must not be None")
     return page.evaluate("""() => {
         const results = [];
         const interactive = ['button','input','textarea','select','a','[role]',
@@ -210,6 +212,8 @@ def quick_find(page_map: PageMap, target_description: str) -> list[MapNode]:
     - "switch, 深度思考" → role=switch, name_contains=深度思考
     - "button, 登录"     → role=button, name_contains=登录
     """
+    if not target_description or not target_description.strip():
+        return []
     parts = [p.strip() for p in target_description.split(",")]
     role = parts[0] if len(parts) >= 1 else None
     name = parts[1] if len(parts) >= 2 else None
