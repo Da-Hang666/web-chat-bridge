@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.web_chat_profile/
+.web_chat_cache.jsonl
+.web_chat_session.json
+.web_chat_screenshots/
+.env
+.vscode/
+*.egg-info/
+dist/
