@@ -380,6 +380,10 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="跳过评审缓存，强制重新请求")
     parser.add_argument("--mode", default="expert", choices=["fast", "expert", "vision"], help="模式切换")
 
+    # CDP
+    parser.add_argument("--cdp", action="store_true", help="通过 CDP 连接已有浏览器")
+    parser.add_argument("--cdp-port", type=int, default=9222, help="CDP 调试端口 (默认 9222)")
+
     # 通用
     parser.add_argument("--send", help="发送单条消息")
     parser.add_argument("--serve", action="store_true", help="启动 HTTP daemon（与 MCP 并存）")
@@ -423,6 +427,7 @@ def main():
         daemon_thread = threading.Thread(
             target=start_daemon,
             args=(args.port, args.site, args.url),
+            kwargs={"cdp": args.cdp, "cdp_port": args.cdp_port},
             daemon=True,
         )
         daemon_thread.start()

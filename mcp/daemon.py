@@ -15,6 +15,7 @@ from pathlib import Path
 
 from browser_controller import (
     send_message, _try_recover_page, enable_deep_think, switch_mode,
+    init_browser, connect_via_cdp,
 )
 from chat_adapters import get_site_config
 from config import DAEMON_PORT, SESSION_FILE, SITE_CONFIGS, SCREENSHOT_DIR
@@ -490,9 +491,19 @@ class DaemonHandler(http.server.BaseHTTPRequestHandler):
         sys.stderr.write(f"[Daemon] {args[0]}\n")
 
 
-def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None):
-    """启动 HTTP daemon，保持浏览器长驻（向后兼容模式）。"""
+def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
+                 cdp: bool = False, cdp_port: int = 9222):
+    """启动 HTTP daemon，保持浏览器长驻（向后兼容模式）。
+    
+    Args:
+        port: HTTP daemon 监听端口
+        site: 站点标识
+        url: 聊天页面 URL
+        cdp: 是否通过 CDP 连接已有浏览器
+        cdp_port: CDP 调试端口
+    """
     from playwright.sync_api import sync_playwright
+    from browser_controller import connect_via_cdp
 
     global _daemon_browser, _daemon_page, _daemon_config, _daemon_session, _daemon_start_time, _daemon_playwright
 
@@ -511,11 +522,24 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None):
             sys.stderr.write(f"[Daemon] 端口 {port} 上有残留 daemon (浏览器已死), 请先终止该进程\n")
             return
 
+    # P0-1: SESSION_FILE 不存在时自动 init
     if not SESSION_FILE.exists():
-        print(json.dumps({"error": "请先运行 --init 初始化"}, ensure_ascii=False))
-        return
+        sys.stderr.write(f"[Daemon] SESSION_FILE 不存在，自动初始化浏览器...\n")
+        site_id = site or "deepseek"
+        init_url = url or SITE_CONFIGS.get(site_id, {}).get("url", "https://chat.deepseek.com")
+        init_browser(init_url, site_id)
+        if not SESSION_FILE.exists():
+            print(json.dumps({"error": "浏览器初始化失败，SESSION_FILE 仍未创建"}, ensure_ascii=False))
+            return
+        sys.stderr.write(f"[Daemon] 浏览器初始化完成，继续启动 daemon...\n")
 
     _daemon_session = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+    
+    # CDP 模式下标记 session
+    if cdp:
+        _daemon_session["cdp"] = True
+        _daemon_session["cdp_port"] = cdp_port
+        SESSION_FILE.write_text(json.dumps(_daemon_session, ensure_ascii=False, indent=2))
 
     if site and site in SITE_CONFIGS and site != "custom":
         _daemon_session["site_id"] = site
@@ -528,30 +552,47 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None):
     site_id = _daemon_session.get("site_id", "custom")
     _daemon_config = SITE_CONFIGS.get(site_id, SITE_CONFIGS["custom"])
 
-    # 初始化浏览器
+    # 初始化浏览器 (CDP 或 persistent_context)
     _init_ok = False
-    for attempt in range(5):
+    if cdp:
+        # P1: CDP 模式 — 连接已有浏览器
         try:
-            _daemon_playwright = sync_playwright().start()
-            _daemon_browser, _daemon_page = get_existing_page(_daemon_playwright, _daemon_session)
+            _daemon_playwright, _daemon_browser, _daemon_page = connect_via_cdp(cdp_port)
             if site_id == "deepseek":
                 try:
                     switch_mode(_daemon_page, "expert")
                     enable_deep_think(_daemon_page)
                 except Exception:
                     pass
-            print(f"[Daemon] 浏览器已就绪 — {_daemon_config['name']} ({_daemon_session['url']})", flush=True)
+            # CDP 模式下无需重试
             _init_ok = True
-            break
+            print(f"[Daemon] CDP 浏览器已连接 — {_daemon_config['name']} ({_daemon_session['url']})", flush=True)
         except Exception as e:
-            sys.stderr.write(f"[Daemon] 浏览器初始化失败(尝试{attempt+1}/5): {e}\n")
+            sys.stderr.write(f"[Daemon] CDP 浏览器连接失败: {e}\n")
+            _init_ok = False
+    else:
+        for attempt in range(5):
             try:
-                if _daemon_playwright:
-                    _daemon_playwright.stop()
-                    _daemon_playwright = None
-            except Exception:
-                pass
-            time.sleep(5)
+                _daemon_playwright = sync_playwright().start()
+                _daemon_browser, _daemon_page = get_existing_page(_daemon_playwright, _daemon_session)
+                if site_id == "deepseek":
+                    try:
+                        switch_mode(_daemon_page, "expert")
+                        enable_deep_think(_daemon_page)
+                    except Exception:
+                        pass
+                print(f"[Daemon] 浏览器已就绪 — {_daemon_config['name']} ({_daemon_session['url']})", flush=True)
+                _init_ok = True
+                break
+            except Exception as e:
+                sys.stderr.write(f"[Daemon] 浏览器初始化失败(尝试{attempt+1}/5): {e}\n")
+                try:
+                    if _daemon_playwright:
+                        _daemon_playwright.stop()
+                        _daemon_playwright = None
+                except Exception:
+                    pass
+                time.sleep(5)
 
     if not _init_ok:
         sys.stderr.write(f"[Daemon] 浏览器初始化失败(已重试5次)，HTTP 服务仍可用但浏览器操作不可用\n")

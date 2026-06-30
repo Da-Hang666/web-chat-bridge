@@ -43,6 +43,10 @@ def init_browser(url: str, site_id: str = None):
         )
         page = browser.pages[0] if browser.pages else browser.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        try:
+            page.bring_to_front()
+        except Exception:
+            pass
 
         if site_id is None:
             site_id, _ = get_site_config(url)
@@ -69,6 +73,15 @@ def init_browser(url: str, site_id: str = None):
             browser.close()
         except Exception:
             pass
+
+
+def connect_via_cdp(port: int = 9222):
+    """通过 Chrome DevTools Protocol 连接已有浏览器。"""
+    from playwright.sync_api import sync_playwright
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+    page = browser.contexts[0].pages[0] if browser.contexts else browser.new_page()
+    return playwright, browser, page
 
 
 def get_existing_page(playwright, session):
