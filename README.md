@@ -4,6 +4,24 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-Stable-brightgreen)]()
+[![PRs](https://img.shields.io/badge/PRs-Welcome-orange)]()
+[![GitHub Stars](https://img.shields.io/github/stars/mels2/web-chat-bridge?style=social)]()
+[![Code style](https://img.shields.io/badge/code%20style-black-000000)]()
+
+```
+              你的代码
+                 │
+    ┌────────────┼────────────┐
+    ▼            ▼            ▼
+  豆包评审    Kimi评审    通义评审
+    └────────────┼────────────┘
+                 ▼
+           加权投票结论
+           pass / warn / fail
+                 │
+          (fail)→ DeepSeek 自动修复 → 再审
+```
 
 ---
 
