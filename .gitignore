@@ -9,3 +9,4 @@ __pycache__/
 *.egg-info/
 dist/
 *_review_result.json
+critic_weights.json

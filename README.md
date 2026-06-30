@@ -74,6 +74,31 @@ python scripts/auto_review.py my_code.py --output fixed_code.py
 
 ---
 
+## 多 Critic 并行评审（v7）
+
+三个评审员同时审，加权投票出结论。免去串行等待，一次拿到所有意见：
+
+```bash
+# 默认三个 Critic 并行
+python scripts/multi_critic.py my_code.py
+
+# 自定义评审团
+python scripts/multi_critic.py my_code.py --critics doubao,kimi,tongyi
+
+# 指定 Critic 权重（doubao 最靠谱，权重高）
+python scripts/multi_critic.py my_code.py --weights critic_weights.json
+
+# 纯 JSON 输出（给脚本调用）
+python scripts/multi_critic.py my_code.py --json --output result.json
+```
+
+权重文件示例 (`critic_weights.json`)：
+```json
+{"doubao": 1.2, "kimi": 1.0, "tongyi": 0.9}
+```
+
+---
+
 ## 架构
 
 ```
@@ -126,7 +151,7 @@ python web_chat_bridge.py --click-text "Submit"
 
 - [x] v5 — Actor-Critic + Browser Agent
 - [x] v6 — 自动迭代闭环 + 评审历史
-- [ ] v7 — 多 Critic 投票 + 隐身浏览器
+- [x] v7 — 多 Critic 投票 + 隐身浏览器
 - [ ] v8 — 插件系统 + 社区贡献
 
 ---
