@@ -1,6 +1,6 @@
-# web-chat-bridge — 多模型 Actor-Critic 协同工厂
+# web-chat-bridge — Web-LLM 能力增强层
 
-> 让一个 LLM 调度其他 LLM 做交叉代码评审 —— 零 API Key，纯网页 UI。现已原生支持 MCP 协议。
+> API 优先，浏览器兜底。当 API 能力不足时，自动激活最强模型的所有能力。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
@@ -10,67 +10,202 @@
 [![Code style](https://img.shields.io/badge/code%20style-black-000000)]()
 
 ```
-              你的代码
-                 │
-    ┌────────────┼────────────┐
-    ▼            ▼            ▼
-  豆包评审    Kimi评审    通义评审
-    └────────────┼────────────┘
-                 ▼
-           加权投票结论
-           pass / warn / fail
-                 │
-          (fail)→ DeepSeek 自动修复 → 再审
+              你的任务
+                  │
+        ┌─────────┴─────────┐
+        │   分层路由器       │
+        │ (mcp/router.py)    │
+        └─────────┬─────────┘
+                  │
+        ┌─────────┴─────────┐
+        ▼                   ▼
+    API 直连           浏览器模式
+    (deepseek-v4-       (网页 UI)
+     flash / pro)           │
+                    ┌───────┴──────┐
+                    ▼              ▼
+              浏览器常驻池       Actor-Critic
+              (预启动2-3实例)     (异步评审)
+                    │              │
+                    └──────┬───────┘
+                           ▼
+                     最终输出
 ```
 
 ---
 
-## 为什么需要它
+## 核心理念
 
-你写了代码，不确定有没有 bug。你没时间让三个人帮你审，但你有一台电脑。
+**web-chat-bridge 不再只是一个"浏览器 API 桥接器"。** 它是一个**能力增强层**：默认使用 API 直连获得最快速度，当 API 能力不足（需要深度思考、识图、联网搜索、自定义指令等）时，自动升级到浏览器模式。
 
-**web-chat-bridge 让三个不同的大模型通过网页版交叉审查你的代码**，
-发现你一个人发现不了的问题，然后自动修复 —— 直到两个不同模型都说"通过"。
-
-不需要 API Key，不需要付费。只需要大家每天都在用的网页版大模型。
+慢不再是 bug——**慢，是因为它在做 API 做不了的事。**
 
 ---
 
-## 与 browser-use 的对比
+## 架构
 
-| | browser-use | **web-chat-bridge** |
-|---|:-----------:|:-------------------:|
-| **定位** | "帮我订机票" | "帮我审代码" |
-| **接入方式** | 需要 API Key | 网页 UI + MCP 协议（零成本） |
-| **多模型协同** | ❌ 单 Agent | ✅ Actor-Critic，3+ 模型 |
-| **自动迭代修复** | ❌ | ✅ 评审→修复→再评审 |
-| **人类化输入** | ❌ | ✅ 逐字打字，随机延迟 |
-| **非 API 模型** | ❌ 无法接入 | ✅ 豆包/Kimi/通义全覆盖 |
-| **MCP 原生支持** | ❌ | ✅ 12 个标准化 Tool |
+v4.1 架构：
+
+```
+┌──────────────┐  MCP stdio  ┌──────────────────────────────────┐
+│  MCP Client  │ ──────────→ │   web-chat-bridge v4.1          │
+│  (Cline/     │ ←────────── │   server.py                     │
+│   CodeWhale)  │  12 tools   │                                  │
+└──────────────┘             │  ┌────────────────────────────┐  │
+                              │  │ 分层路由器 (router.py)     │  │
+                              │  │  auto / api / browser     │  │
+                              │  └───────────┬────────────────┘  │
+                              │              │                    │
+                              │  ┌───────────▼────────────────┐  │
+                              │  │ 浏览器常驻池 (browser_     │  │
+                              │  │ pool.py)                   │  │
+                              │  │ 预启动 N 个 Edge 实例      │  │
+                              │  │ 任务取用 → 归还            │  │
+                              │  │ 心跳维护 + 自动修复        │  │
+                              │  └───────────┬────────────────┘  │
+                              │              │                    │
+                              │  ┌───────────▼────────────────┐  │
+                              │  │ 打字策略分层                │  │
+                              │  │ human → fast → instant     │  │
+                              │  └───────────┬────────────────┘  │
+                              │              │                    │
+                              │  ┌───────────▼────────────────┐  │
+                              │  │ Actor-Critic 异步评审       │  │
+                              │  │ (review_engine.py)         │  │
+                              │  └────────────────────────────┘  │
+                              │                                  │
+                              │  Playwright ────────────→ DeepSeek│
+                              │  (Chromium 长驻)         豆包/Kimi│
+                              └──────────────────────────────────┘ 通义/ChatGPT
+```
+
+### 模块结构 (`mcp/`)
+
+| 文件 | 说明 |
+|------|------|
+| `server.py` | MCP Server 入口（12 Tool + CLI） |
+| **`router.py`** | **分层路由器 — API 优先，浏览器兜底** |
+| **`browser_pool.py`** | **浏览器常驻池 — 预启动 N 个实例** |
+| `daemon.py` | HTTP daemon 向后兼容 + 打字策略 |
+| `browser_controller.py` | Playwright 浏览器控制 |
+| `chat_adapters.py` | 6 平台适配器 |
+| `review_engine.py` | Actor-Critic 评审引擎（新增异步评审） |
+| `image_handler.py` | 图片上传处理 |
+| `cache.py` | TTLCache + singleflight |
+| `config.py` | 配置常量（新增路由/池/策略配置） |
 
 ---
 
-## MCP 模式（v4，推荐）
+## v4.1 新特性
 
-作为标准 MCP Server 运行，直接供 Cline / CodeWhale / Cursor 等 MCP 客户端调用：
+### 1. 浏览器常驻池 (BrowserPool)
+
+预启动 2-3 个 Edge/CDP 实例，维持登录态。任务时直接从池子取实例，**启动开销 → 0**。
 
 ```bash
-# 安装（含 MCP SDK）
+# 启用 3 个浏览器实例的池子
+python mcp/server.py --serve --cdp --pool-size 3
+
+# 日志输出
+[Pool] 浏览器池就绪: 3/3 实例健康
+[Daemon] 浏览器池: 3 实例 | 策略: human
+```
+
+- 心跳维护线程每 15 秒检测实例健康
+- 不健康实例自动重新初始化
+- 并发任务使用不同 page，不冲突
+
+### 2. 分层路由 (Router)
+
+| 模式 | 行为 |
+|------|------|
+| `auto`（默认） | 智能决策：纯文本走 API，复杂任务走浏览器 |
+| `api` | 强制 API 直连，跳过浏览器 |
+| `browser` | 强制浏览器模式 |
+
+**路由决策规则：**
+- 纯文本对话（无特殊需求）→ API（deepseek-v4-flash / pro）
+- 需要深度思考链展示 → 浏览器
+- 需要专家模式 / 自定义指令 → 浏览器
+- 需要联网搜索 + 深度推理 → 浏览器
+- 需要多模态识图（图片理解）→ 浏览器
+- 触发 Actor-Critic 评审 → 浏览器
+- 任意网页聊天 UI 交互 → 浏览器
+
+```bash
+# 强制 API 模式（跳过浏览器）
+python mcp/server.py --route api
+
+# 强制浏览器模式
+python mcp/server.py --route browser
+```
+
+### 3. 打字策略分层
+
+| 策略 | 延迟 | 适用场景 |
+|------|------|----------|
+| `human`（默认） | 30-150ms/字 + 随机停顿 | 需要人类化行为防止检测 |
+| `fast` | 50ms/字，无随机停顿 | 需要速度，不关心检测 |
+| `instant` | <1s | 调试/测试，最快速度 |
+
+```bash
+python mcp/server.py --serve --type-strategy fast
+python mcp/server.py --serve --type-strategy instant  # 输入 <1s
+```
+
+### 4. Actor-Critic 异步评审
+
+不阻塞主流程，后台线程执行评审，通过 callback 返回结果：
+
+```python
+from review_engine import do_review_async
+
+def on_review_result(result):
+    print(f"评审完成: {result['verdict']}")
+
+t = do_review_async(content, context="嵌入式固件", callback=on_review_result)
+# 主流程继续执行，不等待
+```
+
+---
+
+## 快速开始
+
+```bash
+# 安装
 pip install -r mcp/requirements.txt
 playwright install chromium
 
 # 初始化浏览器会话
 python mcp/server.py --init --site deepseek
 
-# 启动 daemon + MCP（后台）
-python mcp/server.py --serve
+# 启动 daemon + 浏览器池 (2 个实例)
+python mcp/server.py --serve --cdp --pool-size 2
 
-# 注册到 MCP 客户端
-# 在客户端的 mcp.json 中添加：
-# { "mcpServers": { "web-chat-bridge": { "command": "python", "args": ["mcp/server.py"] } } }
+# 以快速打字模式启动
+python mcp/server.py --serve --cdp --type-strategy fast
+
+# 以 API 优先模式（完全不启动浏览器）
+python mcp/server.py --serve --route api
 ```
 
-**12 个 MCP Tools：**
+### MCP 模式
+
+注册到 MCP 客户端：
+```json
+{
+  "mcpServers": {
+    "web-chat-bridge": {
+      "command": "python",
+      "args": ["mcp/server.py"]
+    }
+  }
+}
+```
+
+---
+
+## MCP Tools
 
 | Tool | 功能 |
 |------|------|
@@ -89,145 +224,10 @@ python mcp/server.py --serve
 
 ---
 
-## 经典模式（向后兼容）
-
-```bash
-# 评审文件（在另一个终端）
-python web_chat_bridge.py --review-file my_code.py
-```
-
----
-
-## 自动迭代评审（v6）
-
-提交代码，自动评审 → 修复 → 再评审，直到两个不同模型都说"通过"：
-
-```bash
-# 自动评审（默认 2 个 Critic 轮换）
-python scripts/auto_review.py my_code.py
-
-# 三个 Critic 一起审
-python scripts/auto_review.py my_code.py --critics doubao,kimi,tongyi
-
-# 指定上下文
-python scripts/auto_review.py my_code.py --context "嵌入式固件，关注内存安全"
-
-# 输出修复后的版本
-python scripts/auto_review.py my_code.py --output fixed_code.py
-```
-
-流程：
-```
-你的代码 → 豆包评审 → 发现问题 → DeepSeek 修复
-                                    ↓
-                               Kimi 再评审 → 通过 ✅
-```
-
----
-
-## 多 Critic 并行评审（v7）
-
-三个评审员同时审，加权投票出结论。免去串行等待，一次拿到所有意见：
-
-```bash
-# 默认三个 Critic 并行
-python scripts/multi_critic.py my_code.py
-
-# 自定义评审团
-python scripts/multi_critic.py my_code.py --critics doubao,kimi,tongyi
-
-# 指定 Critic 权重（doubao 最靠谱，权重高）
-python scripts/multi_critic.py my_code.py --weights critic_weights.json
-
-# 纯 JSON 输出（给脚本调用）
-python scripts/multi_critic.py my_code.py --json --output result.json
-```
-
-权重文件示例 (`critic_weights.json`)：
-```json
-{"doubao": 1.2, "kimi": 1.0, "tongyi": 0.9}
-```
-
----
-
-## 架构
-
-v4 MCP 架构：
-
-```
-┌──────────────┐  MCP stdio  ┌──────────────────────────┐
-│  MCP Client  │ ──────────→ │   web-chat-bridge v4     │
-│  (Cline/     │ ←────────── │   server.py              │
-│   CodeWhale)  │  12 tools   │                          │
-└──────────────┘             │  ┌────────────────────┐  │
-                              │  │  HTTP :19999       │  │
-┌──────────────┐  HTTP :19999 │  │  (Daemon 向后兼容)  │  │
-│   CLI / 用户  │ ──────────→ │  └────────────────────┘  │
-└──────────────┘             │                          │
-                              │  Playwright ────────────→│ DeepSeek Chat
-                              │  (Chromium 长驻)         │ 豆包 / Kimi
-                              └──────────────────────────┘ 通义 / ChatGPT
-```
-
-### 模块结构 (`mcp/`)
-
-| 文件 | 说明 |
-|------|------|
-| `server.py` | MCP Server 入口（12 Tool + CLI） |
-| `daemon.py` | HTTP daemon 向后兼容 |
-| `browser_controller.py` | Playwright 浏览器控制 |
-| `chat_adapters.py` | 6 平台适配器 |
-| `review_engine.py` | Actor-Critic 评审引擎 |
-| `image_handler.py` | 图片上传处理 |
-| `cache.py` | TTLCache + singleflight |
-| `config.py` | 配置常量 |
-
-### 核心能力
-
-| 层 | 功能 |
-|----|------|
-| **MCP Tools** | 12 个标准化 Tool，供 AI Agent 直接调用 |
-| **Actor-Critic** | DeepSeek 产出 → 网页 LLM 评审 → 迭代直到通过 |
-| **Browser Agent v5** | 截图 / 导航 / 点击 / 滚动 / 输入 / 读文本 / 执行 JS |
-| **人类化输入** | 逐字键盘输入，30-150ms 随机延迟 |
-| **评审缓存** | TTLCache + singleflight 并发合并 |
-
-### 已适配 6 个平台
+## 平台支持
 
 DeepSeek Chat（专家+深度思考+识图）· 豆包（识图）· Kimi ·
 通义千问 · ChatGPT · Claude Web
-
----
-
-## CLI 速查
-
-```bash
-# MCP Server（推荐）
-python mcp/server.py
-
-# Daemon 模式
-python mcp/server.py --serve [--site deepseek|doubao]
-
-# 评审
-python web_chat_bridge.py --review-file path/to/code.py
-python web_chat_bridge.py --review-image screenshot.png
-
-# Browser Agent
-python web_chat_bridge.py --screenshot
-python web_chat_bridge.py --read --read-selector ".main-content"
-python web_chat_bridge.py --navigate "https://github.com/..."
-python web_chat_bridge.py --click-text "Submit"
-```
-
----
-
-## 路线图
-
-- [x] v4 — MCP Server（12 Tool 标准化，模块化拆分）
-- [x] v5 — Actor-Critic + Browser Agent
-- [x] v6 — 自动迭代闭环 + 评审历史
-- [x] v7 — 多 Critic 投票 + 隐身浏览器
-- [ ] v8 — 插件系统 + 社区贡献
 
 ---
 

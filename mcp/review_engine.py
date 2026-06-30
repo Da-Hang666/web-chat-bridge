@@ -207,3 +207,35 @@ def single_send(message: str):
             print(json.dumps(result, ensure_ascii=False, indent=2))
         finally:
             browser.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 异步评审（v4.1）
+# ═══════════════════════════════════════════════════════════════
+
+import threading as _threading
+
+def do_review_async(content: str, context: str = "", mode: str = "expert",
+                    callback=None) -> _threading.Thread:
+    """异步评审：在后台线程执行，通过 callback 返回结果。
+
+    Args:
+        content: 要评审的文本/代码
+        context: 评审上下文
+        mode: 模式 (fast/expert/vision)
+        callback: 可选回调函数，接收评审结果 dict
+
+    Returns:
+        threading.Thread 对象（daemon=True）
+    """
+    def _run():
+        result = do_review(content, context=context, mode=mode)
+        if callback:
+            try:
+                callback(result)
+            except Exception:
+                pass
+    
+    t = _threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t

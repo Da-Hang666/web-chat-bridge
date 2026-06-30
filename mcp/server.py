@@ -388,6 +388,16 @@ def main():
     parser.add_argument("--cdp-browser", default=None,
                         help="指定浏览器路径，如 chrome.exe 或 msedge.exe 的完整路径")
 
+    # v4.1 路由 + 浏览器池 + 打字策略
+    parser.add_argument("--route", default="auto", choices=["auto", "api", "browser"],
+                        help="路由模式: auto=智能路由, api=强制API, browser=强制浏览器 (默认 auto)")
+    parser.add_argument("--pool-size", type=int, default=0,
+                        help="浏览器池大小 (默认 0=禁用池，使用单实例; >0 如 2 则启用池子)")
+    parser.add_argument("--type-strategy", default=None, choices=["human", "fast", "instant"],
+                        help="打字策略: human=人类模拟, fast=快速, instant=即时 (默认 human)")
+    parser.add_argument("--review-async", action="store_true", default=True,
+                        help="启用异步评审 (默认 true)")
+
     # 通用
     parser.add_argument("--send", help="发送单条消息")
     parser.add_argument("--serve", action="store_true", help="启动 HTTP daemon（与 MCP 并存）")
@@ -426,6 +436,17 @@ def main():
 
     # --serve: HTTP daemon（后台运行，保持进程存活）
     if args.serve:
+        # 应用路由配置
+        if args.route != "auto":
+            import config as _cfg
+            _cfg.ROUTE_MODE = args.route
+            sys.stderr.write(f"[Router] 路由模式已设置: {args.route}\n")
+        
+        # 应用打字策略
+        if args.type_strategy:
+            from daemon import set_type_strategy
+            set_type_strategy(args.type_strategy)
+        
         # 启动 HTTP daemon 在后台线程
         import threading
         daemon_thread = threading.Thread(
@@ -436,11 +457,15 @@ def main():
                 "cdp_port": args.cdp_port,
                 "cdp_auto_launch": args.cdp_auto_launch,
                 "cdp_browser_path": args.cdp_browser,
+                "pool_size": args.pool_size,
+                "type_strategy": args.type_strategy,
+                "route_mode": args.route,
             },
             daemon=True,
         )
         daemon_thread.start()
         print(f"[Daemon] HTTP 服务已在端口 {args.port} 启动（后台线程）", flush=True)
+        print(f"[Daemon] 路由: {args.route} | 池大小: {args.pool_size or '单实例'} | 打字策略: {args.type_strategy or 'human'}", flush=True)
         print(f"[Daemon] 按 Ctrl+C 停止服务", flush=True)
         # 保持主线程存活
         try:
@@ -449,6 +474,14 @@ def main():
         except KeyboardInterrupt:
             print("\n[Daemon] 收到停止信号", flush=True)
         return
+
+    # 路由决策日志（不是 serve 模式时）
+    if args.route and args.route != "auto":
+        sys.stderr.write(f"[Router] 路由模式: {args.route}\n")
+    
+    # 打印异步评审状态
+    if args.review_async:
+        sys.stderr.write(f"[Review] 异步评审已启用\n")
 
     # --review 或 --review-file
     if args.review or args.review_file:

@@ -3,10 +3,16 @@ web-chat-bridge MCP — Daemon 管理
 
 向后兼容的 HTTP server（可选），与 MCP Server 并存时使用。
 提供与 v3 相同的 HTTP API 端点。
+
+v4.1 重构：
+- 浏览器常驻池（BrowserPool）：预启动 N 个实例，任务取用后归还
+- 打字策略分层：human / fast / instant
+- 旧 daemon 单实例模式保持向后兼容
 """
 
 import http.server
 import json
+import random
 import socketserver
 import sys
 import threading
@@ -18,7 +24,14 @@ from browser_controller import (
     init_browser, connect_via_cdp, launch_edge_with_cdp, wait_for_cdp,
 )
 from chat_adapters import get_site_config
-from config import DAEMON_PORT, SESSION_FILE, SITE_CONFIGS, SCREENSHOT_DIR
+from config import (
+    DAEMON_PORT, SESSION_FILE, SITE_CONFIGS, SCREENSHOT_DIR,
+    TYPE_STRATEGY, TYPE_FAST_DELAY,
+    HUMAN_MIN_DELAY, HUMAN_MAX_DELAY,
+    HUMAN_PAUSE_MIN, HUMAN_PAUSE_MAX,
+    HUMAN_CHUNK_MIN, HUMAN_CHUNK_MAX,
+    PUNCTUATION_PAUSE, PASTE_THRESHOLD,
+)
 from image_handler import _send_with_image, _wait_for_image_preview
 from review_engine import parse_review_json, CRITIC_PROMPT
 from cache import cache_key, get_cache, get_cache_stats, get_cache_size, clear_cache as cache_clear
@@ -35,6 +48,8 @@ _daemon_playwright = None
 _daemon_start_time = 0.0
 _daemon_lock = threading.Lock()
 _daemon_heartbeat_stop = threading.Event()
+_daemon_pool = None          # BrowserPool 引用（启用池子时设置）
+_daemon_type_strategy = TYPE_STRATEGY  # human / fast / instant
 
 
 def _with_lock(timeout: int = 60):
@@ -43,6 +58,95 @@ def _with_lock(timeout: int = 60):
     if not acquired:
         return {"error": "浏览器正忙，请稍后再试"}
     return None
+
+
+# ── 打字策略 ──
+
+def _human_type(page, input_el, text: str):
+    """模拟人类打字：可变延迟、段落间歇、标点停顿。"""
+    try:
+        input_el.click()
+        time.sleep(random.uniform(0.2, 0.5))
+    except Exception:
+        pass
+
+    total = len(text)
+    next_pause_at = random.randint(HUMAN_CHUNK_MIN, HUMAN_CHUNK_MAX)
+    
+    for i, char in enumerate(text):
+        try:
+            page.keyboard.press(char)
+        except Exception:
+            try:
+                page.keyboard.insert_text(char)
+            except Exception:
+                pass
+
+        delay = random.uniform(HUMAN_MIN_DELAY, HUMAN_MAX_DELAY)
+        if char in '，。！？；：、—…""''）》》《' or char in ',.!?;:':
+            delay += PUNCTUATION_PAUSE
+        if i >= next_pause_at:
+            time.sleep(random.uniform(HUMAN_PAUSE_MIN, HUMAN_PAUSE_MAX))
+            next_pause_at = i + random.randint(HUMAN_CHUNK_MIN, HUMAN_CHUNK_MAX)
+        time.sleep(delay)
+
+    time.sleep(random.uniform(0.3, 0.8))
+    sys.stderr.write(f"[输入] {total} 字符逐字输入完成\n")
+
+
+def _fast_type(page, input_el, text: str):
+    """快速模式：固定短延迟，无随机停顿。"""
+    try:
+        input_el.click()
+        time.sleep(0.1)
+    except Exception:
+        pass
+
+    for char in text:
+        try:
+            page.keyboard.press(char)
+        except Exception:
+            try:
+                page.keyboard.insert_text(char)
+            except Exception:
+                pass
+        time.sleep(TYPE_FAST_DELAY)
+    
+    sys.stderr.write(f"[输入] {len(text)} 字符快速输入完成\n")
+
+
+def _instant_input(page, input_el, text: str):
+    """即时模式：直接 fill 或粘贴，<1s。"""
+    try:
+        input_el.click()
+        time.sleep(0.05)
+    except Exception:
+        pass
+    try:
+        input_el.fill(text)
+    except Exception:
+        try:
+            page.keyboard.insert_text(text)
+        except Exception:
+            pass
+    sys.stderr.write(f"[输入] {len(text)} 字符即时输入完成\n")
+
+
+def _type_text_strategic(page, input_el, text: str, config: dict):
+    """根据打字策略选择输入方式。"""
+    strategy = _daemon_type_strategy or TYPE_STRATEGY
+    
+    if strategy == "instant":
+        _instant_input(page, input_el, text)
+    elif strategy == "fast":
+        _fast_type(page, input_el, text)
+    else:
+        # human 模式：短文本逐字，长文本粘贴
+        if len(text) < PASTE_THRESHOLD:
+            _human_type(page, input_el, text)
+        else:
+            from browser_controller import human_paste
+            human_paste(page, input_el, config, text)
 
 
 # ── CDP 重连逻辑 ──
@@ -143,18 +247,45 @@ def _ensure_page():
     return _daemon_page
 
 
-# ── 带锁的 daemon 操作函数 ──
+# ── 带锁的 daemon 操作函数（单实例模式，向后兼容）──
 
 def daemon_send_message(message: str) -> dict:
-    """在 daemon 持有的浏览器中发送消息。"""
+    """在 daemon 持有的浏览器中发送消息。
+    
+    如果启用了 BrowserPool，从池子取实例；否则使用全局单实例。
+    """
+    global _daemon_page, _daemon_config, _daemon_pool
+    
+    # 池模式
+    if _daemon_pool is not None:
+        inst = _daemon_pool.acquire(timeout=60)
+        if inst is None:
+            return {"error": "浏览器池忙，请稍后再试"}
+        try:
+            # 打字策略集成
+            from chat_adapters import find_and_fill_input
+            input_el = find_and_fill_input(inst.page, _daemon_config)
+            if input_el:
+                _type_text_strategic(inst.page, input_el, message, _daemon_config)
+            return send_message(inst.page, _daemon_config, message)
+        finally:
+            _daemon_pool.release(inst)
+    
+    # 单实例模式（向后兼容）
     lock_err = _with_lock()
     if lock_err:
         return lock_err
     try:
-        global _daemon_page, _daemon_config
         if _daemon_page is None or _daemon_page.is_closed():
             if not _try_recover_page_wrapper():
                 return {"error": "浏览器未就绪，请稍后再试"}
+        
+        # 打字策略集成
+        from chat_adapters import find_and_fill_input
+        input_el = find_and_fill_input(_daemon_page, _daemon_config)
+        if input_el:
+            _type_text_strategic(_daemon_page, input_el, message, _daemon_config)
+        
         return send_message(_daemon_page, _daemon_config, message)
     except Exception as e:
         sys.stderr.write(f"[Daemon] send_message 异常: {e}\n")
@@ -165,12 +296,48 @@ def daemon_send_message(message: str) -> dict:
 
 def daemon_do_review(content: str, context: str = "", deep_think: bool = True,
                      mode: str = "expert") -> dict:
-    """在 daemon 持有的浏览器中执行评审。"""
+    """在 daemon 持有的浏览器中执行评审。
+    
+    如果启用了 BrowserPool，从池子取实例；否则使用全局单实例。
+    """
+    global _daemon_page, _daemon_config, _daemon_session, _daemon_pool
+    
+    # 池模式
+    if _daemon_pool is not None:
+        inst = _daemon_pool.acquire(timeout=120)
+        if inst is None:
+            return {"error": "浏览器池忙，请稍后再试"}
+        try:
+            site_id = _daemon_session.get("site_id", "custom") if _daemon_session else "deepseek"
+            from config import MAX_CONTENT_CHARS
+
+            if len(content) > MAX_CONTENT_CHARS:
+                content = content[:MAX_CONTENT_CHARS] + f"\n\n... (截断，原长度 {len(content)} 字符)"
+
+            prompt = CRITIC_PROMPT
+            if context:
+                prompt = prompt + f"\n\n上下文：{context}\n"
+
+            full_message = prompt + content
+            sys.stderr.write(f"[Critic] 发送 {len(full_message)} 字符，等待评审...\n")
+
+            try:
+                if site_id == "deepseek":
+                    switch_mode(inst.page, mode)
+                    if deep_think:
+                        enable_deep_think(inst.page)
+            except Exception:
+                pass
+
+            return send_message(inst.page, _daemon_config, full_message)
+        finally:
+            _daemon_pool.release(inst)
+    
+    # 单实例模式（向后兼容）
     lock_err = _with_lock()
     if lock_err:
         return lock_err
     try:
-        global _daemon_page, _daemon_config, _daemon_session
         if _daemon_page is None or _daemon_page.is_closed():
             if not _try_recover_page_wrapper():
                 return {"error": "浏览器未就绪，请稍后再试"}
@@ -406,14 +573,21 @@ def daemon_type_text(selector: str, text: str, human_like: bool = True) -> dict:
         el.click()
         el.fill("")
         from config import PASTE_THRESHOLD
-        from browser_controller import human_type, human_paste
-        if human_like and len(text) < PASTE_THRESHOLD:
-            human_type(page, el, text)
+        
+        strategy = _daemon_type_strategy or TYPE_STRATEGY
+        if strategy == "instant":
+            _instant_input(page, el, text)
+        elif strategy == "fast":
+            _fast_type(page, el, text)
+        elif human_like and len(text) < PASTE_THRESHOLD:
+            _human_type(page, el, text)
         else:
+            from browser_controller import human_paste
             human_paste(page, el, _daemon_config or {}, text)
+        
         return {
             "status": "ok", "selector": selector, "length": len(text),
-            "method": "human_type" if (human_like and len(text) < PASTE_THRESHOLD) else "human_paste",
+            "method": strategy,
         }
     except Exception as e:
         return {"error": f"输入失败: {e}"}
@@ -635,10 +809,27 @@ class DaemonHandler(http.server.BaseHTTPRequestHandler):
         sys.stderr.write(f"[Daemon] {args[0]}\n")
 
 
+def set_type_strategy(strategy: str):
+    """设置全局打字策略。"""
+    global _daemon_type_strategy
+    if strategy in ("human", "fast", "instant"):
+        _daemon_type_strategy = strategy
+        sys.stderr.write(f"[Daemon] 打字策略已切换: {strategy}\n")
+    else:
+        sys.stderr.write(f"[Daemon] 不支持的打字策略: {strategy} (使用 human/fast/instant)\n")
+
+
 def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
                  cdp: bool = False, cdp_port: int = 9222,
-                 cdp_auto_launch: bool = True, cdp_browser_path: str = None):
+                 cdp_auto_launch: bool = True, cdp_browser_path: str = None,
+                 pool_size: int = 0, type_strategy: str = None,
+                 route_mode: str = None):
     """启动 HTTP daemon，保持浏览器长驻（向后兼容模式）。
+    
+    v4.1 新增：
+    - pool_size: 浏览器池大小（>0 时启用池模式，默认 0=单实例）
+    - type_strategy: 打字策略 (human/fast/instant)
+    - route_mode: 路由模式 (auto/api/browser)
     
     Args:
         port: HTTP daemon 监听端口
@@ -648,13 +839,29 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
         cdp_port: CDP 调试端口
         cdp_auto_launch: 是否自动启动浏览器
         cdp_browser_path: 自定义浏览器路径
+        pool_size: 浏览器池大小（0=禁用池，使用单实例）
+        type_strategy: 打字策略
+        route_mode: 路由模式
     """
     from playwright.sync_api import sync_playwright
     from browser_controller import connect_via_cdp
 
-    global _daemon_browser, _daemon_page, _daemon_config, _daemon_session, _daemon_start_time, _daemon_playwright
+    global _daemon_browser, _daemon_page, _daemon_config, _daemon_session, \
+           _daemon_start_time, _daemon_playwright, _daemon_pool, _daemon_type_strategy
 
     _daemon_start_time = time.time()
+    
+    # 设置打字策略
+    if type_strategy:
+        _daemon_type_strategy = type_strategy
+    
+    # 设置路由模式
+    if route_mode:
+        from config import ROUTE_MODE as _route_cfg
+        # 直接修改模块级变量（允许运行时切换）
+        import config as _config_module
+        _config_module.ROUTE_MODE = route_mode
+        sys.stderr.write(f"[Daemon] 路由模式已设置: {route_mode}\n")
 
     # 端口冲突检测
     alive, info = _check_daemon(port)
@@ -701,15 +908,39 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
     site_id = _daemon_session.get("site_id", "custom")
     _daemon_config = SITE_CONFIGS.get(site_id, SITE_CONFIGS["custom"])
 
-    # 初始化浏览器 (CDP 或 persistent_context)
-    _init_ok = False
-    if cdp:
-        # P1: CDP 模式 — 自动检测端口 + 启动 + 等待 + 连接（重试 3 次）
+    # ── 浏览器池模式（pool_size > 0）──
+    if cdp and pool_size > 0:
+        from browser_pool import BrowserPool, set_pool
+        sys.stderr.write(f"[Daemon] 启用浏览器池模式 (size={pool_size}, site={site_id})\n")
+        _pool = BrowserPool(size=pool_size, site=site_id)
+        _pool.start()
+        set_pool(_pool)
+        _daemon_pool = _pool
+        # 从池子取一个实例作为 daemon 的默认页面（供 Browser Agent 操作）
+        inst = _pool.acquire(timeout=60)
+        if inst:
+            _daemon_playwright = inst.playwright
+            _daemon_browser = inst.browser
+            _daemon_page = inst.page
+            _init_ok = True
+            print(f"[Daemon] 浏览器池已就绪 — {_daemon_config['name']} ({_daemon_session['url']})", flush=True)
+            # 归还实例（池子模式：daemon_send_message 和 daemon_do_review 会重新 acquire）
+            _pool.release(inst)
+            # 启动心跳
+            _daemon_heartbeat_stop.clear()
+            hb = threading.Thread(target=_heartbeat_loop, daemon=True)
+            hb.start()
+        else:
+            sys.stderr.write(f"[Daemon] 无法从池子获取实例\n")
+            _init_ok = False
+    elif cdp:
+        # ── 单实例 CDP 模式（向后兼容）──
         from browser_controller import find_free_cdp_port, launch_edge_with_cdp, wait_for_cdp
 
         auto_launch = _daemon_session.get("cdp_auto_launch", True)
         browser_path = _daemon_session.get("cdp_browser_path", None)
 
+        _init_ok = False
         for attempt in range(3):
             try:
                 # 1) 找空闲端口（如果指定端口被占用）
@@ -736,7 +967,7 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
                 # 3) 连接
                 _daemon_playwright, _daemon_browser, _daemon_page = connect_via_cdp(port_to_use)
                 
-                # P0: CDP 连接后显式导航到目标页面（此前可能停留在新标签页）
+                # P0: CDP 连接后显式导航到目标页面
                 target_url = _daemon_session.get("url", SITE_CONFIGS.get(site_id, {}).get("url", ""))
                 max_nav_retries = 3
                 for nav_attempt in range(max_nav_retries):
@@ -770,6 +1001,8 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
                 sys.stderr.write(f"[Daemon] CDP 浏览器连接失败(尝试{attempt+1}/3): {e}\n")
                 time.sleep(3)
     else:
+        # ── 非 CDP 模式（persistent_context）──
+        _init_ok = False
         for attempt in range(5):
             try:
                 _daemon_playwright = sync_playwright().start()
@@ -804,6 +1037,10 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
     print(f"[Daemon] Actor-Critic: POST /send | /review | /review-image | /cache/clear", flush=True)
     print(f"[Daemon] Browser Agent: POST /navigate | /screenshot | /read | /click | /scroll | /type | /execute", flush=True)
     print(f"[Daemon] 管理: GET /status | /health | POST /shutdown", flush=True)
+    if _daemon_pool:
+        print(f"[Daemon] 浏览器池: {len(_daemon_pool.instances)} 实例 | 策略: {_daemon_type_strategy}", flush=True)
+    else:
+        print(f"[Daemon] 打字策略: {_daemon_type_strategy}", flush=True)
 
     try:
         server.serve_forever()
@@ -812,7 +1049,16 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
     finally:
         server.server_close()
         try:
-            _daemon_browser.close()
+            if _daemon_pool:
+                # 关闭池子
+                for inst in _daemon_pool.instances:
+                    try:
+                        if inst.playwright:
+                            inst.playwright.stop()
+                    except Exception:
+                        pass
+            else:
+                _daemon_browser.close()
         except Exception:
             pass
         try:

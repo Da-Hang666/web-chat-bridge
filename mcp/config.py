@@ -28,6 +28,22 @@ HUMAN_CHUNK_MAX = 35      # 每 N 个字停一次（上限）
 PUNCTUATION_PAUSE = 0.35  # 标点后额外停顿
 PASTE_THRESHOLD = 200     # 超过此字符数用粘贴代替逐字打字
 
+# ── 打字策略 ──
+TYPE_STRATEGY = "human"   # "human" | "fast" | "instant"
+TYPE_FAST_DELAY = 0.05    # 快速模式的每字延迟
+
+# ── 浏览器池 ──
+POOL_SIZE = 2             # 预启动实例数
+POOL_IDLE_TTL = 600       # 空闲 10 分钟自动回收
+
+# ── 路由 ──
+ROUTE_MODE = "auto"       # "auto" | "api" | "browser"
+API_MODEL = "deepseek-v4-flash"
+
+# ── 评审 ──
+REVIEW_ASYNC = True       # 是否异步评审
+REVIEW_TIMEOUT = 120      # 单次评审超时（秒）
+
 # ── 评审 ──
 MAX_CONTENT_CHARS = 8000  # 超过此长度自动截断
 
