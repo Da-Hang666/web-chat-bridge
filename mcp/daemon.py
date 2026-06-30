@@ -90,16 +90,28 @@ def _reconnect_cdp():
 # ── 心跳线程 ──
 
 def _heartbeat_loop():
-    """后台心跳线程：每 15 秒检测 CDP 连接是否存活。"""
+    """后台心跳线程：每 15 秒检测 CDP 连接是否存活 + URL 漂移检测。"""
     while not _daemon_heartbeat_stop.is_set():
         time.sleep(15)
         try:
             page = _daemon_page
+            session = _daemon_session
             if page is None:
                 sys.stderr.write("[Heartbeat] CDP 连接断开 (page is None)，尝试重连...\n")
             elif page.is_closed():
                 sys.stderr.write("[Heartbeat] CDP 连接断开 (page closed)，尝试重连...\n")
             else:
+                # URL 漂移检测
+                target_url = session.get("url", "") if session else ""
+                if target_url:
+                    current_url = page.url
+                    if target_url not in current_url:
+                        sys.stderr.write(f"[Heartbeat] URL 漂移: {current_url} → 重新导航到 {target_url}\n")
+                        page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(2)
+                        sys.stderr.write(f"[Heartbeat] 导航恢复: {page.url}\n")
+                        continue
+                
                 # 轻量心跳：evaluate 一个简单 JS
                 page.evaluate("1 + 1")
                 continue  # 正常，继续等待
@@ -723,6 +735,24 @@ def start_daemon(port: int = DAEMON_PORT, site: str = None, url: str = None,
 
                 # 3) 连接
                 _daemon_playwright, _daemon_browser, _daemon_page = connect_via_cdp(port_to_use)
+                
+                # P0: CDP 连接后显式导航到目标页面（此前可能停留在新标签页）
+                target_url = _daemon_session.get("url", SITE_CONFIGS.get(site_id, {}).get("url", ""))
+                max_nav_retries = 3
+                for nav_attempt in range(max_nav_retries):
+                    try:
+                        _daemon_page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(2)
+                        if target_url in _daemon_page.url:
+                            sys.stderr.write(f"[Daemon] CDP 页面验证通过: {_daemon_page.url}\n")
+                            break
+                        sys.stderr.write(f"[Daemon] 页面 URL 异常 ({_daemon_page.url}), 重试 {nav_attempt+1}/{max_nav_retries}\n")
+                    except Exception as nav_e:
+                        sys.stderr.write(f"[Daemon] 导航异常: {nav_e}, 重试 {nav_attempt+1}/{max_nav_retries}\n")
+                        time.sleep(2)
+                else:
+                    sys.stderr.write(f"[Daemon] CDP 导航失败，当前页面: {_daemon_page.url}，后续操作可能受影响\n")
+                
                 if site_id == "deepseek":
                     try:
                         switch_mode(_daemon_page, "expert")

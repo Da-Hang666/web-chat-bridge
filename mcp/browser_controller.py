@@ -78,11 +78,26 @@ def init_browser(url: str, site_id: str = None):
 
 
 def connect_via_cdp(port: int = 9222):
-    """通过 Chrome DevTools Protocol 连接已有浏览器。"""
+    """通过 Chrome DevTools Protocol 连接已有浏览器。
+    
+    智能选页原则：
+    1) 遍历所有 context 的所有 pages，找第一个非空白/非 chrome 内部页面
+    2) 如果都是空白/新标签页，新建一个空白 page
+    3) 不在此处导航——由 caller（daemon.py）负责导航到目标 URL
+    """
     from playwright.sync_api import sync_playwright
     playwright = sync_playwright().start()
     browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
-    page = browser.contexts[0].pages[0] if browser.contexts else browser.new_page()
+    
+    # 找第一个非空白、非 chrome 内部页面
+    for context in browser.contexts:
+        for page in context.pages:
+            if page.url and not page.url.startswith("chrome-extension://") and page.url != "about:blank":
+                return playwright, browser, page
+    
+    # 全是空白/新标签页 → 新建一个 page
+    context = browser.contexts[0] if browser.contexts else browser.new_context()
+    page = context.new_page()
     return playwright, browser, page
 
 
