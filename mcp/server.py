@@ -383,6 +383,10 @@ def main():
     # CDP
     parser.add_argument("--cdp", action="store_true", help="通过 CDP 连接已有浏览器")
     parser.add_argument("--cdp-port", type=int, default=9222, help="CDP 调试端口 (默认 9222)")
+    parser.add_argument("--cdp-auto-launch", action="store_true", default=True,
+                        help="自动启动 Edge（默认 true），--no-cdp-auto-launch 禁用")
+    parser.add_argument("--cdp-browser", default=None,
+                        help="指定浏览器路径，如 chrome.exe 或 msedge.exe 的完整路径")
 
     # 通用
     parser.add_argument("--send", help="发送单条消息")
@@ -427,7 +431,12 @@ def main():
         daemon_thread = threading.Thread(
             target=start_daemon,
             args=(args.port, args.site, args.url),
-            kwargs={"cdp": args.cdp, "cdp_port": args.cdp_port},
+            kwargs={
+                "cdp": args.cdp,
+                "cdp_port": args.cdp_port,
+                "cdp_auto_launch": args.cdp_auto_launch,
+                "cdp_browser_path": args.cdp_browser,
+            },
             daemon=True,
         )
         daemon_thread.start()

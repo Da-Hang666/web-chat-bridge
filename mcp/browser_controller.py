@@ -15,6 +15,8 @@ import io
 import json
 import random
 import shutil
+import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -82,6 +84,76 @@ def connect_via_cdp(port: int = 9222):
     browser = playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
     page = browser.contexts[0].pages[0] if browser.contexts else browser.new_page()
     return playwright, browser, page
+
+
+def find_free_cdp_port(start: int = 9222, max_attempts: int = 10):
+    """在 start 到 start+max_attempts-1 范围内找空闲 TCP 端口。"""
+    for port in range(start, start + max_attempts):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(('127.0.0.1', port))
+            s.close()
+            return port
+        except OSError:
+            continue
+    return None
+
+
+def launch_edge_with_cdp(port: int = 9222, browser_path: str = None) -> bool:
+    """启动 Edge 并开启 CDP 调试端口。返回是否成功。"""
+    if browser_path:
+        paths = [browser_path]
+    else:
+        paths = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]
+    for path in paths:
+        if Path(path).exists():
+            subprocess.Popen(
+                [path, f"--remote-debugging-port={port}", "--no-first-run",
+                 "--no-default-browser-check", "--new-window"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True
+    return False
+
+
+def wait_for_cdp(port: int, timeout: int = 30) -> bool:
+    """等待 CDP 端口就绪，带进度提示。返回是否超时。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            s = socket.create_connection(('127.0.0.1', port), timeout=2)
+            s.close()
+            return True
+        except (OSError, ConnectionRefusedError):
+            time.sleep(1)
+    return False
+
+
+def _detect_edge_running() -> bool:
+    """检测 Edge 进程是否已在运行。"""
+    try:
+        result = subprocess.run(
+            ['tasklist', '/fi', 'IMAGENAME eq msedge.exe'],
+            capture_output=True, text=True, timeout=5,
+        )
+        return 'msedge.exe' in result.stdout
+    except Exception:
+        return False
+
+
+def _detect_cdp_port_in_use(port: int = 9222) -> bool:
+    """检测指定 CDP 端口是否已被占用（通过 netstat）。"""
+    try:
+        result = subprocess.run(
+            ['netstat', '-ano', '|', 'findstr', f':{port}'],
+            capture_output=True, text=True, timeout=5, shell=True,
+        )
+        return f':{port}' in result.stdout and 'LISTENING' in result.stdout
+    except Exception:
+        return False
 
 
 def get_existing_page(playwright, session):
