@@ -47,6 +47,33 @@ python web_chat_bridge.py --review-file my_code.py
 
 ---
 
+## 自动迭代评审（v6）
+
+提交代码，自动评审 → 修复 → 再评审，直到两个不同模型都说"通过"：
+
+```bash
+# 自动评审（默认 2 个 Critic 轮换）
+python scripts/auto_review.py my_code.py
+
+# 三个 Critic 一起审
+python scripts/auto_review.py my_code.py --critics doubao,kimi,tongyi
+
+# 指定上下文
+python scripts/auto_review.py my_code.py --context "嵌入式固件，关注内存安全"
+
+# 输出修复后的版本
+python scripts/auto_review.py my_code.py --output fixed_code.py
+```
+
+流程：
+```
+你的代码 → 豆包评审 → 发现问题 → DeepSeek 修复
+                                    ↓
+                               Kimi 再评审 → 通过 ✅
+```
+
+---
+
 ## 架构
 
 ```
@@ -98,7 +125,7 @@ python web_chat_bridge.py --click-text "Submit"
 ## 路线图
 
 - [x] v5 — Actor-Critic + Browser Agent
-- [ ] v6 — 自动迭代闭环 + ClawBench 评测
+- [x] v6 — 自动迭代闭环 + 评审历史
 - [ ] v7 — 多 Critic 投票 + 隐身浏览器
 - [ ] v8 — 插件系统 + 社区贡献
 
