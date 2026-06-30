@@ -47,13 +47,13 @@ import mcp.server.stdio
 import mcp.types as types
 
 # ── 项目模块 ──
-from config import DAEMON_PORT, SESSION_FILE, CACHE_FILE, SCREENSHOT_DIR
+from config import DAEMON_PORT, SESSION_FILE, CACHE_FILE, SCREENSHOT_DIR, SITE_CONFIGS
 import cache as cache_module
 from daemon import (
     daemon_send_message, daemon_do_review, daemon_review_image,
     daemon_screenshot, daemon_navigate, daemon_click,
     daemon_scroll, daemon_read, daemon_type_text, daemon_execute,
-    start_daemon, _call_daemon, _daemon_page, _daemon_config, _daemon_session,
+    start_daemon, _call_daemon, _daemon_config, _daemon_session,
 )
 from browser_controller import init_browser
 from review_engine import do_review, single_send, parse_review_json
@@ -222,8 +222,8 @@ async def handle_list_tools() -> list[types.Tool]:
 
 async def _ensure_daemon_browser() -> dict:
     """确保 daemon 浏览器可用，否则返回错误信息。"""
-    from daemon import _daemon_page, _daemon_config, _daemon_session
-    if _daemon_page is None:
+    from daemon import _daemon_pool
+    if _daemon_pool is None:
         return {"error": "浏览器未就绪。请先通过 CLI 运行 `python server.py --serve` 或 `python server.py --init` 初始化浏览器"}
     return {}
 
@@ -320,13 +320,22 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         elif name == "daemon_status":
-            from daemon import _daemon_session, _daemon_config, _daemon_start_time
+            from daemon import _daemon_session, _daemon_config, _daemon_start_time, _daemon_pool
+            pool_healthy = _daemon_pool is not None
+            browser_alive = False
+            if pool_healthy:
+                try:
+                    inst = _daemon_pool.instances[0] if _daemon_pool.instances else None
+                    browser_alive = inst is not None and inst.healthy
+                except Exception:
+                    browser_alive = False
             status = {
-                "status": "running" if _daemon_page and not _daemon_page.is_closed() else "inactive",
+                "status": "running" if pool_healthy else "inactive",
                 "site": _daemon_config.get("name", "unknown") if _daemon_config else "unknown",
                 "url": _daemon_session.get("url", "") if _daemon_session else "",
                 "uptime": time.time() - _daemon_start_time if _daemon_start_time > 0 else 0,
-                "browser_alive": not (_daemon_page is None or _daemon_page.is_closed()) if _daemon_page else False,
+                "browser_alive": browser_alive,
+                "pool_mode": pool_healthy,
                 "cache_size": cache_module.get_cache_size(),
                 "cache_stats": cache_module.get_cache_stats(),
             }
@@ -433,6 +442,7 @@ def main():
 
     # 通用
     parser.add_argument("--send", help="发送单条消息")
+    parser.add_argument("--direct", help="直连模式：发送消息后立即退出（不启动 daemon）")
     parser.add_argument("--serve", action="store_true", help="启动 HTTP daemon（与 MCP 并存）")
     parser.add_argument("--port", type=int, default=DAEMON_PORT, help=f"Daemon 端口 (默认 {DAEMON_PORT})")
     parser.add_argument("--cache-info", action="store_true", help="显示缓存统计信息后退出")
@@ -467,8 +477,56 @@ def main():
         init_browser(args.url, site_id)
         return
 
+    # --direct: 直连模式下发送一条消息后立即退出
+    if args.direct:
+        from browser_pool import BrowserPool
+        from browser_controller import send_message as direct_send
+        site_id = args.site or "deepseek"
+        pool = BrowserPool(size=1, site=site_id)
+        pool.start()
+        inst = pool.acquire(timeout=30)
+        if inst is None:
+            print(json.dumps({"error": "浏览器未就绪"}, ensure_ascii=False))
+            return
+        config = SITE_CONFIGS.get(inst.site_id, SITE_CONFIGS["custom"])
+        result = direct_send(inst.page, config, args.direct)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        pool.release(inst)
+        return
+
     # --serve: HTTP daemon（后台运行，保持进程存活）
     if args.serve:
+        # P2-2: --route api 跳过浏览器初始化
+        if args.route == "api":
+            import config as _cfg
+            _cfg.ROUTE_MODE = "api"
+            sys.stderr.write(f"[Router] API 模式，跳过浏览器初始化\n")
+            # 启动薄 HTTP daemon（无浏览器池）
+            import threading
+            daemon_thread = threading.Thread(
+                target=start_daemon,
+                args=(args.port, args.site, args.url),
+                kwargs={
+                    "cdp": False,
+                    "cdp_port": args.cdp_port,
+                    "cdp_auto_launch": False,
+                    "cdp_browser_path": None,
+                    "pool_size": 0,
+                    "type_strategy": args.type_strategy,
+                    "route_mode": "api",
+                },
+                daemon=True,
+            )
+            daemon_thread.start()
+            print(f"[Daemon] HTTP 服务已在端口 {args.port} 启动（后台线程，API 模式）", flush=True)
+            print(f"[Daemon] 按 Ctrl+C 停止服务", flush=True)
+            try:
+                while True:
+                    time.sleep(10)
+            except KeyboardInterrupt:
+                print("\n[Daemon] 收到停止信号", flush=True)
+            return
+
         # 应用路由配置
         if args.route != "auto":
             import config as _cfg

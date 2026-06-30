@@ -349,7 +349,8 @@ def send_message(page, config, text: str):
         except Exception:
             response_text = "(无法提取回复)"
 
-    return {"sent": text, "response": response_text, "timestamp": time.time()}
+    ai_done = "内容由 AI 生成" in response_text or "AI 生成" in response_text
+    return {"sent": text, "response": response_text, "timestamp": time.time(), "ai_done": ai_done}
 
 
 def _wait_for_response(page, config, sent_text: str):
@@ -410,7 +411,8 @@ def _wait_for_response(page, config, sent_text: str):
         except Exception:
             response_text = "(无法提取回复)"
     
-    return {"sent": sent_text, "response": response_text, "timestamp": time.time()}
+    ai_done = "内容由 AI 生成" in response_text or "AI 生成" in response_text
+    return {"sent": sent_text, "response": response_text, "timestamp": time.time(), "ai_done": ai_done}
 
 
 def _try_recover_page(daemon_browser, daemon_page, daemon_session, daemon_playwright):
