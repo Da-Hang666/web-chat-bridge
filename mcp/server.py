@@ -354,6 +354,10 @@ async def run_mcp_server():
             InitializationOptions(
                 server_name="web-chat-bridge",
                 server_version="4.0.0",
+                capabilities=server.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities=None,
+                ),
             ),
         )
 
@@ -412,7 +416,7 @@ def main():
         init_browser(args.url, site_id)
         return
 
-    # --serve: HTTP daemon（与 MCP 并存时后台启动）
+    # --serve: HTTP daemon（后台运行，保持进程存活）
     if args.serve:
         # 启动 HTTP daemon 在后台线程
         import threading
@@ -423,7 +427,14 @@ def main():
         )
         daemon_thread.start()
         print(f"[Daemon] HTTP 服务已在端口 {args.port} 启动（后台线程）", flush=True)
-        print(f"[MCP] 现在也可以通过 MCP stdio 协议使用 tools\n", flush=True)
+        print(f"[Daemon] 按 Ctrl+C 停止服务", flush=True)
+        # 保持主线程存活
+        try:
+            while True:
+                time.sleep(10)
+        except KeyboardInterrupt:
+            print("\n[Daemon] 收到停止信号", flush=True)
+        return
 
     # --review 或 --review-file
     if args.review or args.review_file:

@@ -472,7 +472,7 @@ def send_message(page, config, text):
     resp_selectors = config["response_selector"].split(", ")
     response_text = ""
     stable_count = 0
-    for _ in range(30):  # 最多等 30 秒
+    for _ in range(180):  # 最多等 180 秒（长回复容忍）
         time.sleep(1)
         current = ""
         for sel in resp_selectors:
