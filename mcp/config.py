@@ -47,6 +47,9 @@ REVIEW_TIMEOUT = 120      # 单次评审超时（秒）
 # ── 评审 ──
 MAX_CONTENT_CHARS = 8000  # 超过此长度自动截断
 
+# ── 地图 ──
+MAP_REBUILD_INTERVAL = 300  # 每 5 分钟全量重建地图
+
 # ── 平台配置 ──
 SITE_CONFIGS = {
     "deepseek": {

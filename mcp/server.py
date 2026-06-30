@@ -203,6 +203,20 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {},
             },
         ),
+        types.Tool(
+            name="query_element",
+            description="在地图上用自然语言查询页面元素坐标。输入如 'button, 发送' 'textbox, 消息' 'switch, 深度思考'，返回目标元素的坐标、角色、名称等信息。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "目标描述，格式: 'role, name'。如 'button, 发送' 'textbox, 消息' 'switch, 深度思考'"
+                    },
+                },
+                "required": ["description"],
+            },
+        ),
     ]
 
 
@@ -324,6 +338,25 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                 type="text",
                 text=json.dumps({"status": "ok", "message": "所有缓存已清除"}, ensure_ascii=False, indent=2),
             )]
+
+        elif name == "query_element":
+            description = arguments["description"]
+            from browser_pool import get_pool
+            pool = get_pool()
+            if pool is None:
+                return [types.TextContent(type="text", text=json.dumps(
+                    {"error": "浏览器池未启用（需要 --cdp --pool-size > 0）"}, ensure_ascii=False))]
+            inst = pool.acquire(timeout=30)
+            if inst is None or inst.page_map is None:
+                return [types.TextContent(type="text", text=json.dumps(
+                    {"error": "地图未就绪"}, ensure_ascii=False))]
+            try:
+                from page_map import quick_find
+                results = quick_find(inst.page_map, description)
+                return [types.TextContent(type="text", text=json.dumps(
+                    [r.to_dict() for r in results[:10]], ensure_ascii=False, indent=2))]
+            finally:
+                pool.release(inst)
 
         else:
             return [types.TextContent(

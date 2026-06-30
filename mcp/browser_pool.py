@@ -8,6 +8,7 @@ import threading
 import time
 from config import POOL_SIZE, POOL_IDLE_TTL, SITE_CONFIGS
 from browser_controller import connect_via_cdp, find_free_cdp_port, launch_edge_with_cdp, wait_for_cdp
+from page_map import PageMap, MapNode, collect_geometric_nodes
 
 
 class BrowserInstance:
@@ -22,6 +23,7 @@ class BrowserInstance:
         self.in_use = False
         self.last_used = 0.0
         self.healthy = False
+        self.page_map: PageMap | None = None
 
     def is_alive(self) -> bool:
         try:
@@ -97,6 +99,16 @@ class BrowserPool:
             inst.healthy = inst.target_url in inst.page.url
             if inst.healthy:
                 sys.stderr.write(f"[Pool] 实例 {port} 就绪: {inst.page.url}\n")
+                # 建图
+                try:
+                    geom_nodes = collect_geometric_nodes(inst.page)
+                    inst.page_map = PageMap(inst.page.url)
+                    for gn in geom_nodes:
+                        node = MapNode(**gn)
+                        inst.page_map.add_node(node)
+                    sys.stderr.write(f"[Pool] 实例 {port} 地图已构建: {len(inst.page_map.nodes)} 节点\n")
+                except Exception as e:
+                    sys.stderr.write(f"[Pool] 实例 {port} 建图失败: {e}\n")
         except Exception as e:
             sys.stderr.write(f"[Pool] 实例 {port} 初始化失败: {e}\n")
             inst.healthy = False

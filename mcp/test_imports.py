@@ -25,6 +25,9 @@ print("  ✓ review_engine.py")
 from daemon import *
 print("  ✓ daemon.py")
 
+from page_map import PageMap, MapNode, collect_geometric_nodes, quick_find
+print("  ✓ page_map.py")
+
 # Test MCP SDK import
 from mcp.server import Server
 from mcp.types import Tool, TextContent
