@@ -61,6 +61,10 @@ def normalize_content(content: str) -> str:
 
 def cache_key(content: str, context: str = "", mode: str = "expert", do_normalize: bool = True) -> str:
     """构建缓存 key。默认规范化 content 和 context。"""
+    if content is None:
+        content = ""
+    if context is None:
+        context = ""
     if do_normalize:
         content = normalize_content(content)
         context = normalize_context(context) if context else ""
