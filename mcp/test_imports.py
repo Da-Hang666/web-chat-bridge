@@ -23,7 +23,9 @@ from review_engine import *
 print("  ✓ review_engine.py")
 
 from daemon import *
-print("  ✓ daemon.py")
+assert daemon_find_and_click is not None, "daemon_find_and_click not found"
+assert daemon_find_and_type is not None, "daemon_find_and_type not found"
+print("  ✓ daemon.py (incl. find_and_click / find_and_type)")
 
 from page_map import PageMap, MapNode, collect_geometric_nodes, quick_find
 print("  ✓ page_map.py")

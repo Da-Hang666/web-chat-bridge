@@ -35,6 +35,7 @@ from config import (
 from image_handler import _send_with_image, _wait_for_image_preview
 from review_engine import parse_review_json, CRITIC_PROMPT
 from cache import cache_key, get_cache, get_cache_stats, get_cache_size, clear_cache as cache_clear
+from page_map import quick_find
 
 import cache as cache_module
 
@@ -432,6 +433,84 @@ def daemon_execute(js_code: str) -> dict:
         return {"status": "ok", "result": result}
     except Exception as e:
         return {"error": f"JS 执行失败: {e}"}
+    finally:
+        pool.release(inst)
+
+
+# ── 语义直连 + 三级降级点击 ──
+
+def daemon_find_and_click(role: str = None, name: str = None, description: str = None) -> dict:
+    """
+    三级降级点击：
+    1. 语义直连: get_by_role(role, name=name).click()
+    2. 地图坐标: query_element → mouse.click(cx, cy)
+    3. 文字匹配: get_by_text(name).click()
+    """
+    pool = _daemon_pool
+    if pool is None:
+        return {"error": "需要浏览器池模式（--cdp --pool-size > 0）"}
+    inst = pool.acquire(timeout=30)
+    if inst is None:
+        return {"error": "浏览器池忙，请稍后再试"}
+    try:
+        page = inst.page
+
+        # Level 1: 语义直连
+        if role:
+            try:
+                loc = page.get_by_role(role, name=name) if name else page.get_by_role(role)
+                if loc.count() > 0:
+                    loc.first.click()
+                    return {"status": "ok", "method": "semantic", "role": role, "name": name}
+            except Exception:
+                pass
+
+        # Level 2: 地图坐标
+        if inst.page_map and (name or description):
+            desc = description or f"{role or ''}, {name or ''}".strip(", ")
+            results = quick_find(inst.page_map, desc)
+            if results:
+                node = results[0]
+                page.mouse.click(node.cx, node.cy)
+                return {"status": "ok", "method": "coordinate", "score": inst.page_map.score_node(node), "target": node.to_dict()}
+
+        # Level 3: 文字匹配
+        if name:
+            try:
+                loc = page.get_by_text(name, exact=False)
+                if loc.count() > 0:
+                    loc.first.click()
+                    return {"status": "ok", "method": "text", "name": name}
+            except Exception:
+                pass
+
+        return {"error": f"三级降级均未找到目标: role={role} name={name}"}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        pool.release(inst)
+
+
+def daemon_find_and_type(role: str = "textbox", name: str = None, text: str = "") -> dict:
+    """语义直连输入：锁定输入框并填入文本。"""
+    pool = _daemon_pool
+    if pool is None:
+        return {"error": "需要浏览器池模式（--cdp --pool-size > 0）"}
+    inst = pool.acquire(timeout=30)
+    if inst is None:
+        return {"error": "浏览器池忙，请稍后再试"}
+    try:
+        page = inst.page
+        if name:
+            loc = page.get_by_role(role, name=name)
+        else:
+            loc = page.get_by_role(role)
+        if loc.count() == 0:
+            return {"error": f"未找到 role={role} name={name}"}
+        loc.first.fill(text)
+        return {"status": "ok", "role": role, "name": name, "text": text}
+    except Exception as e:
+        return {"error": str(e)}
     finally:
         pool.release(inst)
 

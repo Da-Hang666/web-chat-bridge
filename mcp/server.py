@@ -53,6 +53,7 @@ from daemon import (
     daemon_send_message, daemon_do_review, daemon_review_image,
     daemon_screenshot, daemon_navigate, daemon_click,
     daemon_scroll, daemon_read, daemon_type_text, daemon_execute,
+    daemon_find_and_click, daemon_find_and_type,
     start_daemon, _call_daemon, _daemon_config, _daemon_session,
 )
 from browser_controller import init_browser
@@ -217,6 +218,32 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["description"],
             },
         ),
+        types.Tool(
+            name="find_and_click",
+            description="语义直连点击 + 三级自动降级。输入 role 和 name（如 button 登录、link 设置），自动尝试语义→坐标→文字三层匹配点击。不依赖 CSS class，跨站点通用。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "description": "元素角色: button / link / switch / tab / menuitem"},
+                    "name": {"type": "string", "description": "元素名称: 登录 / 发送 / 设置 / 深度思考"},
+                    "description": {"type": "string", "description": "备用描述（如 button, 登录 格式），用于地图坐标降级时提供查询文本"},
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="find_and_type",
+            description="语义直连输入。用 role+name 锁定输入框并填入文本。不依赖 CSS class 或 selector，跨站点通用。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "description": "元素角色: textbox / searchbox / combobox", "default": "textbox"},
+                    "name": {"type": "string", "description": "输入框名称或 placeholder 关键词"},
+                    "text": {"type": "string", "description": "要输入的文本"},
+                },
+                "required": ["text"],
+            },
+        ),
     ]
 
 
@@ -366,6 +393,22 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
                     [r.to_dict() for r in results[:10]], ensure_ascii=False, indent=2))]
             finally:
                 pool.release(inst)
+
+        elif name == "find_and_click":
+            result = daemon_find_and_click(
+                role=arguments.get("role"),
+                name=arguments.get("name"),
+                description=arguments.get("description"),
+            )
+            return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+
+        elif name == "find_and_type":
+            result = daemon_find_and_type(
+                role=arguments.get("role", "textbox"),
+                name=arguments.get("name"),
+                text=arguments["text"],
+            )
+            return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         else:
             return [types.TextContent(
