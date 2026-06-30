@@ -1,6 +1,6 @@
 # web-chat-bridge — 多模型 Actor-Critic 协同工厂
 
-> 让一个 LLM 调度其他 LLM 做交叉代码评审 —— 零 API Key，纯网页 UI。
+> 让一个 LLM 调度其他 LLM 做交叉代码评审 —— 零 API Key，纯网页 UI。现已原生支持 MCP 协议。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
@@ -41,24 +41,57 @@
 | | browser-use | **web-chat-bridge** |
 |---|:-----------:|:-------------------:|
 | **定位** | "帮我订机票" | "帮我审代码" |
-| **接入方式** | 需要 API Key | 网页 UI（零成本） |
+| **接入方式** | 需要 API Key | 网页 UI + MCP 协议（零成本） |
 | **多模型协同** | ❌ 单 Agent | ✅ Actor-Critic，3+ 模型 |
 | **自动迭代修复** | ❌ | ✅ 评审→修复→再评审 |
 | **人类化输入** | ❌ | ✅ 逐字打字，随机延迟 |
 | **非 API 模型** | ❌ 无法接入 | ✅ 豆包/Kimi/通义全覆盖 |
+| **MCP 原生支持** | ❌ | ✅ 12 个标准化 Tool |
 
 ---
 
-## 30 秒体验
+## MCP 模式（v4，推荐）
+
+作为标准 MCP Server 运行，直接供 Cline / CodeWhale / Cursor 等 MCP 客户端调用：
 
 ```bash
-# 安装
-pip install playwright cachetools
+# 安装（含 MCP SDK）
+pip install -r mcp/requirements.txt
 playwright install chromium
 
-# 启动 daemon（浏览器长驻）
-python web_chat_bridge.py --serve --site deepseek
+# 初始化浏览器会话
+python mcp/server.py --init --site deepseek
 
+# 启动 daemon + MCP（后台）
+python mcp/server.py --serve
+
+# 注册到 MCP 客户端
+# 在客户端的 mcp.json 中添加：
+# { "mcpServers": { "web-chat-bridge": { "command": "python", "args": ["mcp/server.py"] } } }
+```
+
+**12 个 MCP Tools：**
+
+| Tool | 功能 |
+|------|------|
+| `send_message` | 向聊天平台发送消息并获取 AI 回复 |
+| `review_text` | Actor-Critic 结构化评审（缓存） |
+| `review_image` | 识图模式上传图片评审 |
+| `screenshot` | 浏览器截图 |
+| `navigate` | 导航到 URL |
+| `click` | 点击页面元素 |
+| `scroll` | 滚动页面 |
+| `read_page` | 提取页面文本 |
+| `type_text` | 人类化输入文本 |
+| `execute_js` | 执行 JS 代码 |
+| `daemon_status` | 查看运行状态 |
+| `clear_cache` | 清空评审缓存 |
+
+---
+
+## 经典模式（向后兼容）
+
+```bash
 # 评审文件（在另一个终端）
 python web_chat_bridge.py --review-file my_code.py
 ```
@@ -119,25 +152,45 @@ python scripts/multi_critic.py my_code.py --json --output result.json
 
 ## 架构
 
+v4 MCP 架构：
+
 ```
-┌──────────────┐     HTTP :19999      ┌──────────────────────────┐
-│   DeepSeek   │ ─── POST /review ──→ │   web-chat-bridge        │
-│   (Actor)    │ ←── JSON result ──── │   (Daemon)               │
-└──────────────┘                      │                          │
-                                      │  Playwright ────────────→│ DeepSeek Chat
-┌──────────────┐     HTTP :19999      │  (Chromium 长驻)         │ 豆包 / Kimi
-│   CLI / 用户  │ ─── --screenshot ──→ │                          │ 通义 / ChatGPT
-└──────────────┘                      └──────────────────────────┘
+┌──────────────┐  MCP stdio  ┌──────────────────────────┐
+│  MCP Client  │ ──────────→ │   web-chat-bridge v4     │
+│  (Cline/     │ ←────────── │   server.py              │
+│   CodeWhale)  │  12 tools   │                          │
+└──────────────┘             │  ┌────────────────────┐  │
+                              │  │  HTTP :19999       │  │
+┌──────────────┐  HTTP :19999 │  │  (Daemon 向后兼容)  │  │
+│   CLI / 用户  │ ──────────→ │  └────────────────────┘  │
+└──────────────┘             │                          │
+                              │  Playwright ────────────→│ DeepSeek Chat
+                              │  (Chromium 长驻)         │ 豆包 / Kimi
+                              └──────────────────────────┘ 通义 / ChatGPT
 ```
+
+### 模块结构 (`mcp/`)
+
+| 文件 | 说明 |
+|------|------|
+| `server.py` | MCP Server 入口（12 Tool + CLI） |
+| `daemon.py` | HTTP daemon 向后兼容 |
+| `browser_controller.py` | Playwright 浏览器控制 |
+| `chat_adapters.py` | 6 平台适配器 |
+| `review_engine.py` | Actor-Critic 评审引擎 |
+| `image_handler.py` | 图片上传处理 |
+| `cache.py` | TTLCache + singleflight |
+| `config.py` | 配置常量 |
 
 ### 核心能力
 
 | 层 | 功能 |
 |----|------|
+| **MCP Tools** | 12 个标准化 Tool，供 AI Agent 直接调用 |
 | **Actor-Critic** | DeepSeek 产出 → 网页 LLM 评审 → 迭代直到通过 |
 | **Browser Agent v5** | 截图 / 导航 / 点击 / 滚动 / 输入 / 读文本 / 执行 JS |
 | **人类化输入** | 逐字键盘输入，30-150ms 随机延迟 |
-| **评审缓存** | L1（精确）+ L2（语义去噪）— 不重复评审 |
+| **评审缓存** | TTLCache + singleflight 并发合并 |
 
 ### 已适配 6 个平台
 
@@ -149,8 +202,11 @@ DeepSeek Chat（专家+深度思考+识图）· 豆包（识图）· Kimi ·
 ## CLI 速查
 
 ```bash
-# Daemon
-python web_chat_bridge.py --serve [--site deepseek|doubao]
+# MCP Server（推荐）
+python mcp/server.py
+
+# Daemon 模式
+python mcp/server.py --serve [--site deepseek|doubao]
 
 # 评审
 python web_chat_bridge.py --review-file path/to/code.py
@@ -167,6 +223,7 @@ python web_chat_bridge.py --click-text "Submit"
 
 ## 路线图
 
+- [x] v4 — MCP Server（12 Tool 标准化，模块化拆分）
 - [x] v5 — Actor-Critic + Browser Agent
 - [x] v6 — 自动迭代闭环 + 评审历史
 - [x] v7 — 多 Critic 投票 + 隐身浏览器

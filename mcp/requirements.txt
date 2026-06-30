@@ -1,0 +1,17 @@
+# web-chat-bridge MCP Server v4.0.0 依赖
+# 安装: pip install -r requirements.txt
+
+# MCP Python SDK（核心）
+mcp>=1.0.0
+
+# 浏览器自动化（核心）
+playwright>=1.40.0
+
+# 缓存（标准库替代方案：也可用 cachetools）
+cachetools>=5.3.0
+
+# 其余依赖均为 Python 3 标准库：
+# - json, http.server, socketserver (HTTP daemon 向后兼容)
+# - threading, asyncio (并发)
+# - hashlib, re, time, random, atexit, argparse, io, sys, os
+# - pathlib, urllib, shutil
