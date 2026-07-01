@@ -1,6 +1,6 @@
-# web-chat-bridge — Web-LLM 能力增强层
+# web-chat-bridge v5.2 — 追问循环·智力放大器
 
-> API 优先，浏览器兜底。当 API 能力不足时，自动激活最强模型的所有能力。
+> 单次回答只有 60 分，追问 N 轮推到 80-85 分。不靠模型强，靠追问深。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)

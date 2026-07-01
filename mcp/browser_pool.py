@@ -2,10 +2,12 @@
 浏览器常驻池 — 预热 Edge/CDP 实例，维持登录态，任务时直接取用。
 """
 
+import json
 import socket
 import sys
 import threading
 import time
+import urllib.request
 from config import POOL_SIZE, POOL_IDLE_TTL, SITE_CONFIGS
 from browser_controller import connect_via_cdp, find_free_cdp_port, launch_edge_with_cdp, wait_for_cdp
 from page_map import PageMap, MapNode, collect_geometric_nodes
@@ -90,9 +92,16 @@ class BrowserPool:
             inst.last_used = time.time()
 
     def _init_instance(self, inst: BrowserInstance):
-        """初始化单个实例：启动 Edge + CDP 连接 + 导航。"""
+        """初始化单个实例：找现有 CDP + 启动 Edge + 导航。"""
         port = inst.cdp_port
-        if not _is_cdp_listening(port):
+        
+        # v5.0: 先扫描有没有现成的 CDP 端口（Edge 已在运行的情况）
+        existing_cdp = _find_existing_cdp_port(start=port, scan_range=10)
+        if existing_cdp:
+            port = existing_cdp
+            inst.cdp_port = existing_cdp
+            sys.stderr.write(f"[Pool] 复用现有 CDP 端口: {port}\n")
+        elif not _is_cdp_listening(port):
             launch_edge_with_cdp(port)
             wait_for_cdp(port, timeout=30)
         
@@ -155,6 +164,34 @@ def _is_cdp_listening(port: int) -> bool:
         return True
     except Exception:
         return False
+
+
+def _find_existing_cdp_port(start: int = 9222, scan_range: int = 10) -> int | None:
+    """扫描端口范围，找正在监听的 CDP 端口（v5.0）。
+    
+    Windows 上 Edge 已运行时 --remote-debugging-port 被忽略，
+    需要扫描实际监听的端口。
+    """
+    for port in range(start, start + scan_range):
+        try:
+            s = socket.create_connection(('127.0.0.1', port), timeout=1)
+            s.close()
+            # 确认是 CDP（请求 /json/version）
+            import urllib.request
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/json/version",
+                    method="GET",
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if "Browser" in data:
+                        return port
+            except Exception:
+                pass
+        except Exception:
+            continue
+    return None
 
 
 # 全局池子引用（daemon 启动时设置）

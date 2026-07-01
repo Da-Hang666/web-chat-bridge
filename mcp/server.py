@@ -1,11 +1,15 @@
 """
-web-chat-bridge MCP Server v4.0.0
+web-chat-bridge MCP Server v5.2.0 — 追问循环·智力放大器
 
 标准 MCP Server，将 v3 的所有 HTTP endpoint 映射为 MCP Tools。
 同时保留 --serve 模式向后兼容 HTTP API。
 
+v5.0 核心改进：
+  MCP stdio 模式自动初始化浏览器池，无需 --serve 参数。
+  Hermes/Cline/CodeWhale 集成直接可用，效率大幅提升。
+
 用法：
-  # MCP stdio 模式（供 Cline/CodeWhale/Cursor 等 MCP 客户端调用）
+  # MCP stdio 模式（自动初始化浏览器，开箱即用）
   python server.py
 
   # HTTP daemon 模式（向后兼容）
@@ -49,12 +53,15 @@ import mcp.types as types
 # ── 项目模块 ──
 from config import DAEMON_PORT, SESSION_FILE, CACHE_FILE, SCREENSHOT_DIR, SITE_CONFIGS
 import cache as cache_module
+from api_client import api_send_message, api_do_review, api_available
+from inquiry import deep_inquiry as inquiry_deep_inquiry, INQUIRY_STRATEGIES
 from daemon import (
     daemon_send_message, daemon_do_review, daemon_review_image,
     daemon_screenshot, daemon_navigate, daemon_click,
     daemon_scroll, daemon_read, daemon_type_text, daemon_execute,
     daemon_find_and_click, daemon_find_and_type,
-    start_daemon, _call_daemon, _daemon_config, _daemon_session,
+    start_daemon, _call_daemon, _daemon_config, _daemon_session, _daemon_pool,
+    set_type_strategy,
 )
 from browser_controller import init_browser
 from review_engine import do_review, single_send, parse_review_json
@@ -244,22 +251,61 @@ async def handle_list_tools() -> list[types.Tool]:
                 "required": ["text"],
             },
         ),
+        types.Tool(
+            name="deep_inquiry",
+            description="多轮追问循环——单次回答只有60分，追问N轮推到80-85分。支持四种策略：deep(深度追问)、debate(辩论)、socratic(苏格拉底式)、verify(交叉验证)。自动提取上一轮核心论点，生成下一轮追问。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "初始问题/种子问题"},
+                    "strategy": {"type": "string", "description": "追问策略: deep/debate/socratic/verify", "default": "deep", "enum": ["deep", "debate", "socratic", "verify"]},
+                    "rounds": {"type": "integer", "description": "追问轮数(1-5)", "default": 3, "minimum": 1, "maximum": 5},
+                    "site": {"type": "string", "description": "使用的站点(deepseek/doubao)", "default": "doubao"},
+                    "context": {"type": "string", "description": "附加背景上下文", "default": ""},
+                },
+                "required": ["question"],
+            },
+        ),
+        types.Tool(
+            name="cross_review",
+            description="跨模型交叉评审——同一个问题发给两个模型，互相评审对方的回答。低成本获得接近付费API的质量。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "要评审的问题"},
+                    "site_a": {"type": "string", "description": "第一个模型站点", "default": "deepseek"},
+                    "site_b": {"type": "string", "description": "第二个模型站点", "default": "doubao"},
+                    "context": {"type": "string", "description": "评审附加上下文", "default": ""},
+                },
+                "required": ["question"],
+            },
+        ),
     ]
-
-
-async def _ensure_daemon_browser() -> dict:
-    """确保 daemon 浏览器可用，否则返回错误信息。"""
-    from daemon import _daemon_pool
-    if _daemon_pool is None:
-        return {"error": "浏览器未就绪。请先通过 CLI 运行 `python server.py --serve` 或 `python server.py --init` 初始化浏览器"}
-    return {}
 
 
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    """处理 MCP 工具调用（v5.0: 支持自动初始化的浏览器池）。"""
     try:
         if name == "send_message":
-            result = daemon_send_message(arguments["message"])
+            message = arguments["message"]
+            msg_key = cache_module.cache_key(message, context="", mode="send")
+            _cache = cache_module.get_cache()
+            # v5.1: API 直连优先，失败降级到浏览器
+            if api_available():
+                result = api_send_message(message)
+                if "error" not in result:
+                    return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+                sys.stderr.write(f"[MCP] API 直连失败，降级到浏览器: {result['error'][:100]}\n")
+            # 浏览器降级 + 缓存
+            if msg_key in _cache:
+                cached = _cache[msg_key]
+                cached["_source"] = "cache"
+                return [types.TextContent(type="text", text=json.dumps(cached, ensure_ascii=False, indent=2))]
+            result = daemon_send_message(message)
+            if "error" not in result:
+                cache_module.set_cache(msg_key, result)
+                result["_source"] = "fresh"
             return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         elif name == "review_text":
@@ -267,25 +313,31 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             context = arguments.get("context", "")
             mode = arguments.get("mode", "expert")
             cache_bypass = arguments.get("cache_bypass", False)
+            key = cache_module.cache_key(content, context, mode)
+            _cache = cache_module.get_cache()
 
-            # 缓存查询
-            if not cache_bypass:
-                key = cache_module.cache_key(content, context, mode)
-                _cache = cache_module.get_cache()
-                if key in _cache:
-                    cached = _cache[key]
-                    cached["_source"] = "cache"
-                    return [types.TextContent(type="text", text=json.dumps(cached, ensure_ascii=False, indent=2))]
+            # 缓存命中（任何路径共享）
+            if not cache_bypass and key in _cache:
+                cached = _cache[key]
+                cached["_source"] = "cache"
+                return [types.TextContent(type="text", text=json.dumps(cached, ensure_ascii=False, indent=2))]
 
+            # v5.1: API 直连优先，失败降级到浏览器
+            if api_available() and mode != "vision":
+                result = api_do_review(content, context=context)
+                if "error" not in result:
+                    cache_module.set_cache(key, result)
+                    result["_source"] = "fresh"
+                    return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+                sys.stderr.write(f"[MCP] API 评审失败，降级到浏览器: {result['error'][:100]}\n")
+
+            # 浏览器降级
             result = daemon_do_review(content, context=context, deep_think=True, mode=mode)
-
             if "error" not in result:
-                key = cache_module.cache_key(content, context, mode)
                 cache_module.set_cache(key, result)
                 result["_source"] = "fresh"
             else:
                 result["_source"] = "error"
-
             return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         elif name == "review_image":
@@ -347,20 +399,20 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
         elif name == "daemon_status":
-            from daemon import _daemon_session, _daemon_config, _daemon_start_time, _daemon_pool
-            pool_healthy = _daemon_pool is not None
+            import daemon as _dm
+            pool_healthy = _dm._daemon_pool is not None
             browser_alive = False
             if pool_healthy:
                 try:
-                    inst = _daemon_pool.instances[0] if _daemon_pool.instances else None
+                    inst = _dm._daemon_pool.instances[0] if _dm._daemon_pool.instances else None
                     browser_alive = inst is not None and inst.healthy
                 except Exception:
                     browser_alive = False
             status = {
                 "status": "running" if pool_healthy else "inactive",
-                "site": _daemon_config.get("name", "unknown") if _daemon_config else "unknown",
-                "url": _daemon_session.get("url", "") if _daemon_session else "",
-                "uptime": time.time() - _daemon_start_time if _daemon_start_time > 0 else 0,
+                "site": _dm._daemon_config.get("name", "unknown") if _dm._daemon_config else "unknown",
+                "url": _dm._daemon_session.get("url", "") if _dm._daemon_session else "",
+                "uptime": time.time() - _dm._daemon_start_time if _dm._daemon_start_time > 0 else 0,
                 "browser_alive": browser_alive,
                 "pool_mode": pool_healthy,
                 "cache_size": cache_module.get_cache_size(),
@@ -381,7 +433,7 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             pool = get_pool()
             if pool is None:
                 return [types.TextContent(type="text", text=json.dumps(
-                    {"error": "浏览器池未启用（需要 --cdp --pool-size > 0）"}, ensure_ascii=False))]
+                    {"error": "浏览器池未启用"}, ensure_ascii=False))]
             inst = pool.acquire(timeout=30)
             if inst is None or inst.page_map is None:
                 return [types.TextContent(type="text", text=json.dumps(
@@ -410,6 +462,68 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
             )
             return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
+        elif name == "deep_inquiry":
+            question = arguments["question"]
+            strategy = arguments.get("strategy", "deep")
+            rounds = arguments.get("rounds", 3)
+            context = arguments.get("context", "")
+            site = arguments.get("site", "doubao")
+
+            pool = _daemon_pool
+            if pool is None:
+                return [types.TextContent(type="text", text=json.dumps(
+                    {"error": "浏览器池未就绪，请先启动"}, ensure_ascii=False))]
+            inst = pool.acquire(timeout=60)
+            if inst is None:
+                return [types.TextContent(type="text", text=json.dumps(
+                    {"error": "浏览器池忙"}, ensure_ascii=False))]
+            try:
+                config = SITE_CONFIGS.get(site, SITE_CONFIGS["doubao"])
+                result = inquiry_deep_inquiry(
+                    inst.page, config, seed_question=question,
+                    strategy=strategy, max_rounds=rounds, context=context,
+                )
+                return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
+            finally:
+                pool.release(inst)
+
+        elif name == "cross_review":
+            question = arguments["question"]
+            site_a = arguments.get("site_a", "deepseek")
+            site_b = arguments.get("site_b", "doubao")
+            context = arguments.get("context", "")
+
+            pool = _daemon_pool
+            if pool is None:
+                return [types.TextContent(type="text", text=json.dumps(
+                    {"error": "浏览器池未就绪"}, ensure_ascii=False))]
+
+            results = {}
+            # 模型A回答
+            inst_a = pool.acquire(timeout=60)
+            if inst_a:
+                try:
+                    config_a = SITE_CONFIGS.get(site_a, SITE_CONFIGS["deepseek"])
+                    from inquiry import deep_inquiry
+                    r = deep_inquiry(inst_a.page, config_a, question, strategy="deep", max_rounds=1, context=context)
+                    results[site_a] = r["final_response"][:2000] if r["rounds"] else ""
+                finally:
+                    pool.release(inst_a)
+
+            # 模型B评审A
+            inst_b = pool.acquire(timeout=60)
+            if inst_b:
+                try:
+                    config_b = SITE_CONFIGS.get(site_b, SITE_CONFIGS["doubao"])
+                    review_q = f"请评审以下{site_a}的回答，指出问题和优点：\n\n{results.get(site_a, '')[:2000]}"
+                    from inquiry import deep_inquiry
+                    r = deep_inquiry(inst_b.page, config_b, review_q, strategy="deep", max_rounds=1, context=context)
+                    results[f"{site_b}_review"] = r["final_response"][:2000] if r["rounds"] else ""
+                finally:
+                    pool.release(inst_b)
+
+            return [types.TextContent(type="text", text=json.dumps(results, ensure_ascii=False, indent=2))]
+
         else:
             return [types.TextContent(
                 type="text",
@@ -426,19 +540,63 @@ async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent
         )]
 
 
-# ═══════════════════════════════════════════════════════════════
-# MCP Server 启动
-# ═══════════════════════════════════════════════════════════════
+def _init_mcp_browser_pool():
+    """在独立线程初始化浏览器池（v5.0），避免 Playwright sync_api 污染主事件循环。
+    
+    Playwright 的同步 API 会隐式启动 asyncio 事件循环，
+    在独立线程中运行可避免与后续 MCP 协议的 asyncio.run() 冲突。
+    """
+    import daemon as _daemon_module
+    
+    # 如果池子已就绪，跳过
+    if _daemon_module._daemon_pool is not None:
+        return
+    
+    def _do_pool_init():
+        """实际初始化逻辑（在线程中运行）。"""
+        _daemon_module._daemon_start_time = time.time()
+        
+        # 站点配置：默认 DeepSeek
+        site_id = "deepseek"
+        url = SITE_CONFIGS[site_id]["url"]
+        
+        _daemon_module._daemon_session = {
+            "url": url,
+            "site_id": site_id,
+            "cdp": True,
+            "cdp_port": 9222,
+            "cdp_auto_launch": True,
+        }
+        _daemon_module._daemon_config = SITE_CONFIGS[site_id]
+        
+        # 初始化浏览器池（2 实例，支持并发处理）
+        sys.stderr.write("[MCP] 正在初始化浏览器池（连接 Edge CDP）...\n")
+        from browser_pool import BrowserPool, set_pool
+        try:
+            pool = BrowserPool(size=2, site=site_id)
+            pool.start()
+            set_pool(pool)
+            _daemon_module._daemon_pool = pool
+            sys.stderr.write(f"[MCP] ✓ 浏览器池就绪: {site_id} @ {url}\n")
+        except Exception as e:
+            sys.stderr.write(f"[MCP] ✗ 浏览器池初始化失败: {e}\n")
+            sys.stderr.write("[MCP] 部分工具不可用（需要浏览器池）。仍可通过 API 模式使用评审功能。\n")
+    
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_do_pool_init)
+        future.result(timeout=120)
+
 
 async def run_mcp_server():
-    """启动 MCP stdio Server。"""
+    """启动 MCP stdio Server（v5.0: 浏览器池已在主线程初始化）。"""
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
             write_stream,
             InitializationOptions(
                 server_name="web-chat-bridge",
-                server_version="4.0.0",
+                server_version="5.2.0",
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
                     experimental_capabilities=None,
@@ -672,6 +830,8 @@ def main():
         return
 
     # 默认：启动 MCP stdio server
+    # v5.0: 浏览器池已在独立线程初始化，主线程无事件循环冲突
+    _init_mcp_browser_pool()
     import asyncio
     asyncio.run(run_mcp_server())
 

@@ -270,9 +270,8 @@ def send_message(page, config, text: str):
     if input_el is None:
         return {"error": "找不到输入框"}
 
-    pre_delay = random.uniform(1.0, 3.0)
-    sys.stderr.write(f"[等待] 发送前等待 {pre_delay:.1f} 秒...\n")
-    time.sleep(pre_delay)
+    # v5.1: 去掉发送前延迟（CDP 直连无需拟人化等待）
+    sys.stderr.write("[发送] 立即发送...\n")
 
     if len(text) >= PASTE_THRESHOLD:
         human_paste(page, input_el, config, text)
